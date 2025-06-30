@@ -1,6 +1,6 @@
 # mySpringSnail
 项目大体框架
-![5b6a8c957efcca7349f44ecdc2e81983](https://github.com/user-attachments/assets/b2268ff7-c3fe-4197-8ec7-f6d26e8f62cb =100x100)
+![5b6a8c957efcca7349f44ecdc2e81983](https://github.com/user-attachments/assets/b2268ff7-c3fe-4197-8ec7-f6d26e8f62cb)
 
 config.xml内容
 ![c637f02a05d6d4ce7345bf4b50cd3db0](https://github.com/user-attachments/assets/99690952-e613-479f-b41e-2e27384f2eb6)
