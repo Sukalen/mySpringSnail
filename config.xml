@@ -1,0 +1,12 @@
+Listen 0.0.0.0:12345
+
+<logical_host>
+	<name>192.168.90.130</name>
+	<port>54321</port>
+	<conns>5</conns>
+</logical_host>
+<logical_host>
+	<name>192.168.90.132</name>
+	<port>54321</port>
+	<conns>5</conns>
+</logical_host>
