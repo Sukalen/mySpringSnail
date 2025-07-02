@@ -82,7 +82,7 @@ template<typename C,typename H,typename M>
 processpool<C,H,M>* processpool<C,H,M>::m_instance = NULL;
 
 static int EPOLL_WAIT_TIME = 5000;
-static sig_pipefd[2];
+static int sig_pipefd[2];
 static void sig_handler(int sig)
 {
 	int save_errno = errno;
@@ -119,31 +119,327 @@ processpool<C,H,M>::processpool(int listenfd,int process_number)
 		int ret = socketpair(AF_UNIX,SOCK_STREAM,0,m_sub_process[i].m_pipefd);
 		assert( 0 == ret);
 
+		m_sub_process[i].m_pid = fork();
+		assert(m_sub_process[i].m_pid >= 0);
+		if(m_sub_process[i].m_pid > 0)
+		{
+			close(m_sub_process[i].m_pipefd[1]);
+			m_sub_process[i].m_busy_ratio = 0;
+			continue;
+		}
+		else
+		{
+			close(m_sub_process[i].m_pipefd[0]);
+			m_idx = i;
+			break;
+		}
+	}
+}
 
 
+template<typename C,typename H,typename M>
+int processpool<C,H,M>::get_most_free_srv()
+{
+	int ratio = m_sub_process[0].m_busy_ratio;
+	int idx = 0;
+	for(int i=1;i<m_process_number;++i)
+	{
+		if(m_sub_process[i].m_busy_ratio < ratio)
+		{
+			ratio = m_sub_process[i].m_busy_ratio;
+			idx = i;
+		}
+	}
+	return idx;
+}
 
 
+template<typename C,typename H,typename M>
+void processpool<C,H,M>::notify_parent_busy_ratio(int pipefd,M* manager)
+{
+	int msg = manager->get_used_conn_cnt();
+	send(pipefd,(char*)&msg,sizeof(msg),0);
+}
+
+template<typename C,typename H,typename M>
+void processpool<C,H,M>::setup_sig_pipe()
+{
+	m_epollfd = epoll_create(5);
+	assert(m_epollfd != -1);
+
+	int ret = socketpair(AF_UNIX,SOCK_STREAM,0,sig_pipefd);
+	assert(ret != -1);
+	setnonblocking(sig_pipefd[1]);
+	add_read_fd(m_epollfd,sig_pipefd[0]);
+	
+	addsig(SIGCHLD,sig_handler);
+	addsig(SIGTERM,sig_handler);
+	addsig(SIGINT,sig_handler);
+	addsig(SIGPIPE,SIG_IGN);
+}
 
 
+template<typename C,typename H,typename M>
+void processpool<C,H,M>::run(const vector<H>& arg)
+{
+	if(m_idx != -1)
+	{
+		run_child(arg);
+		return;
+	}
+	run_parent();
+}
 
 
+template<typename C,typename H,typename M>
+void processpool<C,H,M>::run_parent()
+{
+	setup_sig_pipe();
+	for(int i=0;i<m_process_number;++i)
+	{
+		add_read_fd(m_epollfd,m_sub_process[i].m_pipefd[0]);
+	}
+	add_read_fd(m_epollfd,m_listenfd);
 
+	struct epoll_event events[MAX_EVENT_NUMBER];
+	int sub_process_counter = 0;
+	int new_conn = 1;
+	int number = 0;
+	int ret = -1;
 
+	while(!m_stop)
+	{
+		number = epoll_wait(m_epollfd,events,MAX_EVENT_NUMBER,EPOLL_WAIT_TIME);
+		if( number < 0 && errno != EINTR)
+		{
+			log(LOG_ERR,__FILE__,__LINE__,"%s","epoll error");
+			break;
+		}
 
+		for(int i=0;i<number;++i)
+		{
+			int sockfd = events[i].data.fd;
+			if(sockfd == m_listenfd)
+			{
+				int idx = get_most_free_srv();
+				send(m_sub_process[idx].m_pipefd[0],(char*)&new_conn,sizeof(new_conn),0);
+				log(LOG_INFO,__FILE__,__LINE__,"send request to child %d",idx);
+			}
+			else if(sockfd == sig_pipefd[0] && (events[i].events & EPOLLIN))
+			{
+				int sig;
+				char signals[1024];
+				ret = recv(sig_pipefd[0],signals,sizeof(signals),0);
+				if(ret <= 0)
+				{
+					continue;
+				}
+				else
+				{
+					for(int j = 0;j<ret;++j)
+					{
+						switch(signals[j])
+						{
+							case SIGCHLD:
+								pid_t pid;
+								int stat;
+								while( (pid=waitpid(-1,&stat,WNOHANG))>0)
+								{
+									for(int k=0;k<m_process_number;++k)
+									{
+										if(m_sub_process[k].m_pid == pid)
+										{
+											log(LOG_INFO,__FILE__,__LINE__,"child %d join",k);
+											close(m_sub_process[k].m_pipefd[0]);
+											m_sub_process[k].m_pid = -1;
+										}
+									}
+								}
 
+								m_stop = true;
+								for(int k=0;k<m_process_number;++k)
+								{
+									if(m_sub_process[k].m_pid != -1)
+									{
+										m_stop = false;
+									}
+								}
+								break;
+							case SIGTERM:
+							case SIGINT:
+								log(LOG_INFO,__FILE__,__LINE__,"%s","kill all the child now");
+								for(int k=0;k<m_process_number;++k)
+								{
+									int pid = m_sub_process[k].m_pid;
+									if(pid != -1)
+									{
+										kill(pid,SIGTERM);
+									}
+								}
+								break;
+							default:
+								break;
+						}
+					}
+				}
+			}
+			else if(events[i].events & EPOLLIN)
+			{
+				int busy_ratio = 0;
+				ret = recv(sockfd,(char*)&busy_ratio,sizeof(busy_ratio),0);
+				if( (ret < 0 && errno != EAGAIN) || 0 == ret)
+				{
+					continue;
+				}
 
+				for(int j = 0;j<m_process_number;++j)
+				{
+					if(sockfd == m_sub_process[j].m_pipefd[0])
+					{
+						m_sub_process[i].m_busy_ratio = busy_ratio;
+						break;
+					}
+				}
+			}
+		}
+	}
+	for(int i=0;i<m_process_number;++i)
+	{
+		closefd(m_epollfd,m_sub_process[i].m_pipefd[0]);
+	}
+	close(m_epollfd);	
+}
 
+template<typename C,typename H,typename M>
+void processpool<C,H,M>::run_child(const vector<H>& arg)
+{
+	setup_sig_pipe();
 
+	int pipefd_read = m_sub_process[m_idx].m_pipefd[1];
+	add_read_fd(m_epollfd,pipefd_read);
 
+	struct epoll_event events[MAX_EVENT_NUMBER];
 
+	M* manager = new M(m_epollfd,arg[m_idx]);
+	assert(manager);
 
+	int number = 0;
+	int ret = -1;
 
+	while(!m_stop)
+	{
+		number = epoll_wait(m_epollfd,events,MAX_EVENT_NUMBER,EPOLL_WAIT_TIME);
 
+		if(number < 0 && errno != EINTR)
+		{
+			log(LOG_ERR,__FILE__,__LINE__,"%s","epoll error");
+			break;
+		}
 
+		if( 0 == number)
+		{
+			manager->recycle_conns();
+			continue;
+		}
 
+		for(int i = 0;i<number;++i)
+		{
+			int sockfd = events[i].data.fd;
 
+			if( sockfd == pipefd_read && (events[i].events & EPOLLIN))
+			{
+				int new_conn = 0;
+				ret = recv(sockfd,(char*)&new_conn,sizeof(new_conn),0);
+				if((ret < 0 && errno != EAGAIN) || 0 == ret)
+				{
+					continue;
+				}
+				
+				struct sockaddr_in cliaddr;
+				socklen_t clilen = sizeof(cliaddr);
+				int connfd = accept(m_listenfd,(struct sockaddr*)&cliaddr,&clilen);
+				if(connfd < 0)
+				{
+					log(LOG_ERR,__FILE__,__LINE__,"errno:%s",strerror(errno));
+					continue;
+				}
+				add_read_fd(m_epollfd,connfd);
+				
+				C* conn = manager->pick_conn(connfd);
+				if(!conn)
+				{
+					closefd(m_epollfd,connfd);
+					continue;
+				}
+				conn->init_clt(connfd,cliaddr);
+				notify_parent_busy_ratio(pipefd_read,manager);
+			}
+			else if(sockfd == sig_pipefd[0] && (events[i].events & EPOLLIN))
+			{
+				int sig;
+				char signals[1024];
+				ret = recv(sockfd,signals,sizeof(signals),0);
+				if(ret <= 0)
+				{
+					continue;
+				}
+				else
+				{
+					for(int j=0;j<ret;++j)
+					{
+						switch(signals[j])
+						{
+							case SIGCHLD:
+								pid_t pid;
+								int stat;
+								while( (pid=waitpid(-1,&stat,WNOHANG)) > 0)
+								{
+									continue;
+								}
+								break;
+							case SIGTERM:
+							case SIGINT:
+								m_stop = true;
+								break;
+							default:
+								break;
+						}
+					}
+				}
+			}
+			else if(events[i].events & EPOLLIN)
+			{
+				RET_CODE result = manager->process(sockfd,READ);
+				switch(result)
+				{
+					case CLOSED:
+						notify_parent_busy_ratio(pipefd_read,manager);
+						break;
+					default:
+						break;
+				}
+			}
+			else if(events[i].events & EPOLLOUT)
+			{
+				RET_CODE result = manager->process(sockfd,WRITE);
+				switch(result)
+				{
+					case CLOSED:
+						notify_parent_busy_ratio(pipefd_read,manager);
+						break;
+					default:
+						break;
+				}
+			}
+			else
+			{
+				continue;
+			}
+		}
+	}
+	close(pipefd_read);
+	close(m_epollfd);
 
-
-
+}
 
 #endif
