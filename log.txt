@@ -1,0 +1,11 @@
+[ 07/03/25 20:17:23 ]mgr.cpp:0053 info: logical server host info:(192.168.90.130 8081)
+[ 07/03/25 20:17:24 ]mgr.cpp:0065 info: build connection 0 to server success
+[ 07/03/25 20:17:25 ]mgr.cpp:0065 info: build connection 1 to server success
+[ 07/03/25 20:17:26 ]mgr.cpp:0065 info: build connection 2 to server success
+[ 07/03/25 20:17:27 ]mgr.cpp:0065 info: build connection 3 to server success
+[ 07/03/25 20:17:28 ]mgr.cpp:0065 info: build connection 4 to server success
+[ 07/03/25 20:17:42 ]mgr.cpp:0109 info: bind client sock 14 with server sock 9
+[ 07/03/25 20:17:42 ]processpool.h:0226 info: send request to child 0
+[ 07/03/25 20:18:03 ]mgr.cpp:0143 info: fix connection success
+[ 07/03/25 20:18:15 ]processpool.h:0270 info: kill all the child now
+[ 07/03/25 20:18:15 ]processpool.h:0252 info: child 0 join
